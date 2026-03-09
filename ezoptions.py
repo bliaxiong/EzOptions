@@ -551,149 +551,16 @@ def add_heatmap_highlight(fig, data_matrix, x_labels, y_labels, is_global_norm, 
             yref='y'
         )
 
-def map_to_spx_strikes(df, etf_price, spx_price, bucket_size=10):
-    """
-    Maps ETF strikes to SPX-equivalent strikes using moneyness, then distributes
-    using a Gaussian kernel with adaptive bandwidth based on ETF strike spacing.
-    
-    Gaussian kernel: weight = exp(-distance² / (2σ²))
-    where σ (bandwidth) = half of ETF's strike spacing in SPX terms
-    
-    This ensures each ETF naturally spreads to enough buckets to fill its gaps:
-    - IWM: $1 strikes → ~$26 SPX spacing → σ = $13 → spreads ~3 buckets each side
-    - SPY: $1 strikes → ~$10 SPX spacing → σ = $5 → spreads ~1-2 buckets each side
-    - SPX: $5 strikes → $5 spacing → σ = $2.5 → mostly stays in one bucket
-    
-    Args:
-        df: DataFrame with 'strike' column
-        etf_price: Current ETF spot price
-        spx_price: Current SPX spot price  
-        bucket_size: Strike bucket width in dollars (default $10)
-    
-    Returns:
-        DataFrame with strikes distributed via Gaussian kernel to SPX buckets
-    """
-    if df.empty:
-        return df
-        
-    df = df.copy()
-    
-    # Store original values for Greek calculations
-    df['_original_strike'] = df['strike']
-    df['_original_spot'] = etf_price
-    
-    # Estimate ETF's typical strike spacing (use median diff of sorted strikes)
-    sorted_strikes = np.sort(df['strike'].unique())
-    if len(sorted_strikes) > 1:
-        strike_diffs = np.diff(sorted_strikes)
-        etf_strike_spacing = np.median(strike_diffs[strike_diffs > 0])
-    else:
-        etf_strike_spacing = 1.0  # Default for single strike
-    
-    # Convert ETF strike spacing to SPX-equivalent spacing
-    spx_equivalent_spacing = etf_strike_spacing * (spx_price / etf_price)
-    
-    # Bandwidth (σ) = half of SPX-equivalent spacing
-    # This ensures Gaussian reaches adjacent ETF-equivalent strikes
-    sigma = spx_equivalent_spacing / 2
-    
-    # Minimum sigma to ensure some spread
-    sigma = max(sigma, bucket_size / 2)
-    
-    # Calculate moneyness and SPX-equivalent strikes
-    moneyness = df['strike'] / etf_price
-    target_strikes = moneyness * spx_price
-    
-    # Determine range of buckets to distribute to (±3σ covers 99.7%)
-    spread_range = int(np.ceil(3 * sigma / bucket_size))
-    spread_range = max(spread_range, 1)  # At least 1 bucket each side
-    spread_range = min(spread_range, 5)  # Cap at 5 buckets each side
-    
-    # Generate all bucket offsets
-    offsets = np.arange(-spread_range, spread_range + 1) * bucket_size
-    
-    result_dfs = []
-    
-    for offset in offsets:
-        df_bucket = df.copy()
-        
-        # Calculate the bucket center for this offset
-        base_bucket = np.round(target_strikes / bucket_size) * bucket_size
-        bucket_strike = base_bucket + offset
-        
-        # Calculate distance from target to this bucket
-        distance = bucket_strike - target_strikes
-        
-        # Gaussian weight
-        weight = np.exp(-distance**2 / (2 * sigma**2))
-        
-        # Only keep rows with meaningful weight
-        mask = weight > 0.01
-        if not mask.any():
-            continue
-            
-        df_bucket = df_bucket[mask].copy()
-        weight = weight[mask]
-        
-        df_bucket['strike'] = bucket_strike[mask]
-        df_bucket['_bucket_weight'] = weight
-        
-        # Scale OI and volume by weight
-        if 'openInterest' in df_bucket.columns:
-            df_bucket['openInterest'] = df_bucket['openInterest'] * weight
-        if 'volume' in df_bucket.columns:
-            df_bucket['volume'] = df_bucket['volume'] * weight
-        
-        result_dfs.append(df_bucket)
-    
-    if not result_dfs:
-        # Fallback: just round to nearest bucket
-        df['strike'] = np.round(target_strikes / bucket_size) * bucket_size
-        df['_bucket_weight'] = 1.0
-        return df
-    
-    result = pd.concat(result_dfs, ignore_index=True)
-    
-    # Normalize weights so total OI/volume per original row is preserved
-    # Group by original strike and normalize
-    if '_original_strike' in result.columns:
-        weight_sums = result.groupby('_original_strike')['_bucket_weight'].transform('sum')
-        
-        # Replace zero weight sums with 1 to avoid division issues
-        weight_sums = weight_sums.replace(0, 1)
-        
-        norm_factor = 1.0 / weight_sums
-        
-        # Clean up any inf/nan in norm_factor
-        norm_factor = norm_factor.replace([np.inf, -np.inf], 1.0).fillna(1.0)
-        
-        if 'openInterest' in result.columns:
-            # Simplified: just multiply by norm_factor
-            result['openInterest'] = result['openInterest'] * norm_factor
-        if 'volume' in result.columns:
-            result['volume'] = result['volume'] * norm_factor
-        
-        result['_bucket_weight'] = result['_bucket_weight'] * norm_factor
-    
-    return result
-
-
 def normalize_market_components(calls, puts):
     """
-    Three-stage per-column geometric mean normalization for MARKET composite.
+    Base-anchored normalization for MARKET composite.
     
-    Normalizes each exposure/activity column independently so that every component
-    (SPX, SPY, QQQ, IWM) contributes proportionally to its own activity level,
-    scaled to a common magnitude via geometric mean across all components.
-    
-    Stage 1: Per-source total absolute value for each column
-    Stage 2: Geometric mean scale factor across sources, per column
-    Stage 3: Normalize each source → proportions of own activity, then scale back
-             to displayable units using geometric mean
+    Uses SPX totals as a fixed reference so that each non-SPX component is scaled
+    to match SPX's magnitude per column.  SPX bars never move when another
+    component's data changes — only the non-base component's factor is affected.
     
     Operates on DataFrames that already have '_source' column and all exposure columns computed.
     """
-    # Columns to normalize independently — exposures + activity metrics
     NORM_COLS = ['GEX', 'VEX', 'DEX', 'Charm', 'Speed', 'Vomma', 'Color',
                  'openInterest', 'volume']
     
@@ -706,13 +573,12 @@ def normalize_market_components(calls, puts):
     if len(sources) <= 1:
         return calls, puts
     
-    # Determine which norm columns actually exist in the data
     available_cols = [col for col in NORM_COLS if col in combined.columns]
     if not available_cols:
         return calls, puts
     
     # --- Stage 1: Per-source total absolute value for each column ---
-    totals = {}  # totals[source][col] = sum(|values|)
+    totals = {}
     for source in sources:
         source_mask = combined['_source'] == source
         source_data = combined[source_mask]
@@ -721,38 +587,29 @@ def normalize_market_components(calls, puts):
             total_abs = source_data[col].abs().sum()
             totals[source][col] = total_abs if total_abs > 0 else 0.0
     
-    # --- Stage 2: Geometric mean scale factor per column ---
-    geo_scale = {}
-    for col in available_cols:
-        # Collect non-zero totals for this column across sources
-        col_totals = [totals[src][col] for src in sources if totals[src][col] > 0]
-        if len(col_totals) >= 2:
-            # Geometric mean: exp(mean(log(x)))
-            geo_scale[col] = np.exp(np.mean(np.log(col_totals)))
-        elif len(col_totals) == 1:
-            # Only one source has data — use its total as-is (no scaling)
-            geo_scale[col] = col_totals[0]
-        else:
-            geo_scale[col] = 0.0
+    # --- Stage 2: Base-anchored — use SPX totals as the fixed reference ---
+    base_source = 'SPX'
+    if base_source not in totals:
+        return calls, puts
     
-    # --- Stage 3: Normalize each source, scale back to geo_scale magnitude ---
-    # Build per-source, per-column normalization factors
-    # col_norm[source][col] = geo_scale[col] / totals[source][col]
-    # Multiply each source's column values by this factor
+    base_totals = totals[base_source]
     
+    # --- Stage 3: Scale each non-base source so its total matches SPX's ---
     for df in [calls, puts]:
         if df.empty or '_source' not in df.columns:
             continue
         for source in sources:
+            if source == base_source:
+                continue  # SPX stays unchanged
             source_mask = df['_source'] == source
             if not source_mask.any():
                 continue
             for col in available_cols:
                 src_total = totals[source][col]
-                if src_total > 0 and geo_scale[col] > 0:
-                    norm_factor = geo_scale[col] / src_total
+                base_total = base_totals[col]
+                if src_total > 0 and base_total > 0:
+                    norm_factor = base_total / src_total
                     df.loc[source_mask, col] = df.loc[source_mask, col] * norm_factor
-                # If src_total == 0, values are already 0 — no change needed
     
     return calls, puts
 
@@ -764,10 +621,8 @@ def fetch_options_for_date(ticker, date, S=None):
         # Get prices for scaling (Base price is ^GSPC)
         spx_price = S if S else get_current_price("^SPX")
         spy_price = get_current_price("SPY")
-        qqq_price = get_current_price("QQQ")
-        iwm_price = get_current_price("IWM")
         
-        if not (spx_price and spy_price and qqq_price and iwm_price):
+        if not (spx_price and spy_price):
              # Try our best with what we have, but SPX is required for scaling base
              if not spx_price:
                  return pd.DataFrame(), pd.DataFrame()
@@ -776,6 +631,16 @@ def fetch_options_for_date(ticker, date, S=None):
         spx_calls, spx_puts = fetch_options_for_date("^SPX", date, spx_price)
         if spx_calls.empty and spx_puts.empty:
             return pd.DataFrame(), pd.DataFrame()
+        
+        # Determine dynamic bucket size from the SPX strike grid
+        base_all_strikes = sorted(set(
+            spx_calls['strike'].tolist() + spx_puts['strike'].tolist()
+        ))
+        if len(base_all_strikes) >= 2:
+            diffs = np.diff(base_all_strikes)
+            bucket_size = float(np.median(diffs[diffs > 0])) if np.any(diffs > 0) else 5.0
+        else:
+            bucket_size = 5.0
         
         calls_list = []
         puts_list = []
@@ -797,39 +662,89 @@ def fetch_options_for_date(ticker, date, S=None):
                 if not c.empty:
                     c = c.copy()
                     c['_source'] = source_label
-                    
-                    # For SPX: set original values before Gaussian spreading
-                    if is_spx:
-                        c['_original_strike'] = c['strike']
-                        c['_original_spot'] = etf_price
+                    c['_original_strike'] = c['strike']
+                    c['_original_spot'] = etf_price
                     
                     # For ETFs: Pre-calculate IV using ORIGINAL ETF values before strike mapping
                     # IV is scale-independent - transfers directly to SPX equivalent
                     if not is_spx and 'impliedVolatility' not in c.columns:
                         c['_mid'] = (c['bid'].fillna(0) + c['ask'].fillna(0)) / 2
                     
-                    # Apply Gaussian spreading to ALL sources (including SPX) for consistent treatment
-                    c = map_to_spx_strikes(c, etf_price, spx_price)
-                    
-                    calls_list.append(c)
+                    weight_cols = [col for col in ['GEX', 'DEX', 'VEX', 'Charm', 'Speed',
+                                                   'Vomma', 'Color', 'openInterest', 'volume']
+                                   if col in c.columns]
+
+                    if is_spx:
+                        # Base component: skip interpolation to avoid float-jitter ghost buckets.
+                        c_mapped = c.copy()
+                        c_mapped['strike'] = np.round(c_mapped['strike'] / bucket_size) * bucket_size
+                        c_mapped['_bucket_weight'] = 1.0
+                        calls_list.append(c_mapped)
+                    else:
+                        # Non-base components: round mapped strike before bucketing to avoid floor jitter.
+                        moneyness = c['strike'] / etf_price
+                        exact = np.round(moneyness * spx_price, 10)
+                        bucket_lo = np.floor(exact / bucket_size) * bucket_size
+                        bucket_hi = bucket_lo + bucket_size
+                        weight_hi = (exact - bucket_lo) / bucket_size
+                        weight_lo = 1.0 - weight_hi
+
+                        c_lo = c.copy()
+                        c_lo['strike'] = bucket_lo
+                        c_lo['_bucket_weight'] = weight_lo
+                        for wc in weight_cols:
+                            c_lo[wc] = c_lo[wc] * weight_lo
+
+                        c_hi = c.copy()
+                        c_hi['strike'] = bucket_hi
+                        c_hi['_bucket_weight'] = weight_hi
+                        for wc in weight_cols:
+                            c_hi[wc] = c_hi[wc] * weight_hi
+
+                        calls_list.append(pd.concat([c_lo, c_hi], ignore_index=True))
                 
                 if not p.empty:
                     p = p.copy()
                     p['_source'] = source_label
-                    
-                    # For SPX: set original values before Gaussian spreading
-                    if is_spx:
-                        p['_original_strike'] = p['strike']
-                        p['_original_spot'] = etf_price
+                    p['_original_strike'] = p['strike']
+                    p['_original_spot'] = etf_price
                     
                     # For ETFs: Pre-calculate IV using ORIGINAL ETF values before strike mapping
                     if not is_spx and 'impliedVolatility' not in p.columns:
                         p['_mid'] = (p['bid'].fillna(0) + p['ask'].fillna(0)) / 2
                     
-                    # Apply Gaussian spreading to ALL sources (including SPX)
-                    p = map_to_spx_strikes(p, etf_price, spx_price)
-                    
-                    puts_list.append(p)
+                    weight_cols = [col for col in ['GEX', 'DEX', 'VEX', 'Charm', 'Speed',
+                                                   'Vomma', 'Color', 'openInterest', 'volume']
+                                   if col in p.columns]
+
+                    if is_spx:
+                        # Base component: skip interpolation to avoid float-jitter ghost buckets.
+                        p_mapped = p.copy()
+                        p_mapped['strike'] = np.round(p_mapped['strike'] / bucket_size) * bucket_size
+                        p_mapped['_bucket_weight'] = 1.0
+                        puts_list.append(p_mapped)
+                    else:
+                        # Non-base components: round mapped strike before bucketing to avoid floor jitter.
+                        moneyness = p['strike'] / etf_price
+                        exact = np.round(moneyness * spx_price, 10)
+                        bucket_lo = np.floor(exact / bucket_size) * bucket_size
+                        bucket_hi = bucket_lo + bucket_size
+                        weight_hi = (exact - bucket_lo) / bucket_size
+                        weight_lo = 1.0 - weight_hi
+
+                        p_lo = p.copy()
+                        p_lo['strike'] = bucket_lo
+                        p_lo['_bucket_weight'] = weight_lo
+                        for wc in weight_cols:
+                            p_lo[wc] = p_lo[wc] * weight_lo
+
+                        p_hi = p.copy()
+                        p_hi['strike'] = bucket_hi
+                        p_hi['_bucket_weight'] = weight_hi
+                        for wc in weight_cols:
+                            p_hi[wc] = p_hi[wc] * weight_hi
+
+                        puts_list.append(pd.concat([p_lo, p_hi], ignore_index=True))
                 
                 component_count += 1
             except Exception:
@@ -839,8 +754,6 @@ def fetch_options_for_date(ticker, date, S=None):
         add_normalized_data("^SPX", spx_price, is_spx=True)
         # Add other products, mapping to SPX strike grid
         if spy_price: add_normalized_data("SPY", spy_price)
-        if qqq_price: add_normalized_data("QQQ", qqq_price)
-        if iwm_price: add_normalized_data("IWM", iwm_price)
         
         combined_calls = pd.concat(calls_list, ignore_index=True) if calls_list else pd.DataFrame()
         combined_puts = pd.concat(puts_list, ignore_index=True) if puts_list else pd.DataFrame()
@@ -3570,72 +3483,46 @@ def create_iv_surface(calls_df, puts_df, current_price, selected_dates=None):
     if selected_dates:
         calls_df = calls_df[calls_df['extracted_expiry'].isin(selected_dates)]
         puts_df = puts_df[puts_df['extracted_expiry'].isin(selected_dates)]
-    
-    # Add flag for IV calculation
+
     calls_df = calls_df.copy()
     puts_df = puts_df.copy()
-    calls_df['flag'] = 'c'
-    puts_df['flag'] = 'p'
 
     # Combine calls and puts
     options_data = pd.concat([calls_df, puts_df])
-    
-    # Calculate IV manually
-    r = st.session_state.get('risk_free_rate', 0.04)
-    
-    # Pre-calculate time to expiration for all unique dates to avoid repeated calls
-    unique_dates = options_data['extracted_expiry'].unique()
-    t_map = {date: max(calculate_time_to_expiration(date), 1e-5) for date in unique_dates}
 
-    def calc_iv_safe(row):
-        try:
-            t = t_map.get(row['extracted_expiry'])
-            if t is None: return None
-            
-            bid = row.get('bid', 0)
-            ask = row.get('ask', 0)
-            price = (bid + ask) / 2
-            
-            if price <= 0: return None
-            
-            iv = calculate_implied_volatility(price, current_price, row['strike'], t, r, row['flag'])
-            if iv is not None and 0 < iv <= 5.0:
-                return iv
-            return None
-        except:
-            return None
+    # Use yfinance impliedVolatility directly; drop rows with missing/invalid values
+    options_data = options_data.dropna(subset=['impliedVolatility', 'strike', 'extracted_expiry'])
+    options_data = options_data[
+        (options_data['impliedVolatility'] > 0) &
+        (options_data['impliedVolatility'] <= 5.0)
+    ]
 
-    options_data['calc_iv'] = options_data.apply(calc_iv_safe, axis=1)
-    
-    # Drop rows with invalid calculated IV
-    options_data = options_data.dropna(subset=['calc_iv', 'strike', 'extracted_expiry'])
-    
     if options_data.empty:
         st.warning("No valid options data available for IV surface.")
         return None, None, None
-    
+
     # Calculate moneyness and months to expiration
     options_data['moneyness'] = options_data['strike'].apply(
         lambda x: (x / current_price) * 100
     )
-    
+
     options_data['months'] = options_data['extracted_expiry'].apply(
         lambda x: (x - get_now_et().date()).days / 30.44
     )
-    
-    # Remove extreme values (using calc_iv instead of impliedVolatility)
-    for col in ['calc_iv', 'moneyness', 'months']:
+
+    # Remove extreme values
+    for col in ['impliedVolatility', 'moneyness', 'months']:
         q1 = options_data[col].quantile(0.01)
         q99 = options_data[col].quantile(0.99)
         options_data = options_data[
-            (options_data[col] >= q1) & 
+            (options_data[col] >= q1) &
             (options_data[col] <= q99)
         ]
-    
+
     if options_data.empty:
         st.warning("No valid data points after filtering.")
         return None, None, None
-    
+
     # Create grid for interpolation
     moneyness_range = np.linspace(85, 115, 200)
     months_range = np.linspace(
@@ -3643,45 +3530,29 @@ def create_iv_surface(calls_df, puts_df, current_price, selected_dates=None):
         options_data['months'].max(),
         200
     )
-    
+
     # Create meshgrid
     X, Y = np.meshgrid(moneyness_range, months_range)
-    
-    try:
-        # Prepare data for interpolation
-        points = options_data[['moneyness', 'months']].values
-        values = options_data['calc_iv'].values * 100  # Use calc_iv
-        
-        # Initial interpolation
-        Z = griddata(
-            points,
-            values,
-            (X, Y),
-            method='linear',  # Start with linear interpolation
-            fill_value=np.nan
-        )
-        
-        # Fill remaining NaN values with nearest neighbor interpolation
-        mask = np.isnan(Z)
-        Z[mask] = griddata(
-            points,
-            values,
-            (X[mask], Y[mask]),
-            method='nearest'
-        )
-        
-        # Apply Gaussian smoothing with multiple passes
-        if not np.isnan(Z).any():  # Only smooth if we have valid data
-            from scipy.ndimage import gaussian_filter
-            Z = gaussian_filter(Z, sigma=1.5)
-            Z = gaussian_filter(Z, sigma=0.75)
-            Z = gaussian_filter(Z, sigma=0.5)
-        
-        return X, Y, Z
-        
-    except Exception as e:
-        st.error(f"Error creating IV surface: {str(e)}")
-        return None, None, None
+
+    # Prepare data for interpolation
+    points = options_data[['moneyness', 'months']].values
+    values = options_data['impliedVolatility'].values * 100
+
+    # Initial interpolation
+    Z = griddata(points, values, (X, Y), method='linear', fill_value=np.nan)
+
+    # Fill remaining NaN values with nearest neighbour interpolation
+    mask = np.isnan(Z)
+    Z[mask] = griddata(points, values, (X[mask], Y[mask]), method='nearest')
+
+    # Apply Gaussian smoothing with multiple passes
+    if not np.isnan(Z).any():
+        from scipy.ndimage import gaussian_filter
+        Z = gaussian_filter(Z, sigma=1.5)
+        Z = gaussian_filter(Z, sigma=0.75)
+        Z = gaussian_filter(Z, sigma=0.5)
+
+    return X, Y, Z
 
 #Streamlit UI
 st.title("Ez Options")
@@ -6143,6 +6014,9 @@ if st.session_state.current_page == "OI & Volume":
                     st.warning("No options data available for the selected dates.")
                     st.stop()
                 
+                if ticker == "MARKET" and '_source' in all_calls.columns:
+                    all_calls, all_puts = normalize_market_components(all_calls, all_puts)
+
                 # New: Add tabs to organize content
                 tab1, tab2, tab3, tab4 = st.tabs(["OI & Volume Charts", "Options Flow Analysis", "Premium Analysis", "Market Maker"])
                 
