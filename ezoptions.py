@@ -4168,10 +4168,10 @@ def chart_settings():
         
         st.selectbox(
             "Exposure Calculation Metric:",
-            options=['Open Interest', 'Volume', 'Max OI vs Volume'],
-            index=['Open Interest', 'Volume', 'Max OI vs Volume'].index(st.session_state.exposure_metric) if st.session_state.exposure_metric in ['Open Interest', 'Volume', 'Max OI vs Volume'] else 0,
+            options=['Open Interest', 'Volume', 'Max OI vs Volume', 'OI + Volume'],
+            index=['Open Interest', 'Volume', 'Max OI vs Volume', 'OI + Volume'].index(st.session_state.exposure_metric) if st.session_state.exposure_metric in ['Open Interest', 'Volume', 'Max OI vs Volume', 'OI + Volume'] else 0,
             key='exposure_metric',
-            help="Open Interest: Use raw OI for exposure calculations.\nVolume: Use today's volume only.\nMax OI vs Volume: Uses the greater of OI or Volume for each contract."
+            help="Open Interest: Use raw OI for exposure calculations.\nVolume: Use today's volume only.\nMax OI vs Volume: Uses the greater of OI or Volume for each contract.\nOI + Volume: Sums OI and Volume for each contract."
         )
 
         # Initialize delta-adjusted exposures setting
@@ -4694,6 +4694,10 @@ def compute_greeks_and_charts(ticker, expiry_date_str, page_key, S):
         
         calls_metric = np.maximum(calls_oi, calls_vol)
         puts_metric = np.maximum(puts_oi, puts_vol)
+    elif metric_type == 'OI + Volume':
+        # Sum OI and Volume for each contract
+        calls_metric = calls['openInterest'].fillna(0) + calls['volume'].fillna(0)
+        puts_metric = puts['openInterest'].fillna(0) + puts['volume'].fillna(0)
     else: # Open Interest
         calls_metric = calls['openInterest']
         puts_metric = puts['openInterest']
@@ -5639,6 +5643,10 @@ def create_davi_chart(calls, puts, S, date_count=1):
         
         calls_metric = np.maximum(calls_oi, calls_vol)
         puts_metric = np.maximum(puts_oi, puts_vol)
+    elif metric_type == 'OI + Volume':
+        # Sum OI and Volume for each contract
+        calls_metric = calls_df['openInterest'].fillna(0) + calls_df['volume'].fillna(0)
+        puts_metric = puts_df['openInterest'].fillna(0) + puts_df['volume'].fillna(0)
     else: # Open Interest
         calls_metric = calls_df['openInterest'].fillna(0)
         puts_metric = puts_df['openInterest'].fillna(0)
