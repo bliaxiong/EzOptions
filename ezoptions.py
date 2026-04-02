@@ -4424,7 +4424,7 @@ def chart_settings():
 
         # Dashboard strike count limit
         if 'dashboard_strike_count' not in st.session_state:
-            st.session_state.dashboard_strike_count = 20
+            st.session_state.dashboard_strike_count = 15
 
         st.number_input(
             "Dashboard Strike Count (Above/Below):",
@@ -9283,7 +9283,7 @@ elif st.session_state.current_page == "Exposure Heatmap":
                     heatmap_strike_count = st.number_input(
                         "Strikes Above/Below Current Price (0 = all):",
                         min_value=0,
-                        value=st.session_state.get('heatmap_strike_count', 0),
+                        value=st.session_state.get('heatmap_strike_count', 15),
                         step=1,
                         key="heatmap_strike_count",
                         help="Enter N to display N strikes above and N strikes below the current price. Set to 0 to show all strikes."
