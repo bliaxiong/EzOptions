@@ -4422,6 +4422,19 @@ def chart_settings():
             key="strike_range"
         )
 
+        # Dashboard strike count limit
+        if 'dashboard_strike_count' not in st.session_state:
+            st.session_state.dashboard_strike_count = 20
+
+        st.number_input(
+            "Dashboard Strike Count (Above/Below):",
+            min_value=0,
+            value=st.session_state.dashboard_strike_count,
+            step=1,
+            help="Limits the Dashboard exposure charts to N strikes above and N strikes below the current price. Set to 0 to show all strikes within the strike range.",
+            key="dashboard_strike_count"
+        )
+
         if 'chart_type' not in st.session_state:
             st.session_state.chart_type = 'Bar'  # Default chart type
 
@@ -4905,6 +4918,19 @@ def create_exposure_bar_chart(calls, puts, exposure_type, title, S):
     # Filter the original dataframes for net exposure calculation
     calls_filtered = calls[(calls['strike'] >= min_strike) & (calls['strike'] <= max_strike)]
     puts_filtered = puts[(puts['strike'] >= min_strike) & (puts['strike'] <= max_strike)]
+
+    # Apply dashboard strike count limit (N above and N below current price)
+    if st.session_state.get('current_page') == 'Dashboard':
+        n = st.session_state.get('dashboard_strike_count', 20)
+        if n > 0:
+            all_present = sorted(set(calls_df['strike']) | set(puts_df['strike']))
+            if all_present:
+                atm_idx = min(range(len(all_present)), key=lambda i: abs(all_present[i] - S))
+                allowed = set(all_present[max(0, atm_idx - n): atm_idx + n + 1])
+                calls_df = calls_df[calls_df['strike'].isin(allowed)]
+                puts_df = puts_df[puts_df['strike'].isin(allowed)]
+                calls_filtered = calls_filtered[calls_filtered['strike'].isin(allowed)]
+                puts_filtered = puts_filtered[puts_filtered['strike'].isin(allowed)]
 
     # Calculate Net Exposure based on type using filtered data
     if exposure_type == 'GEX' or exposure_type == 'GEX_notional':
