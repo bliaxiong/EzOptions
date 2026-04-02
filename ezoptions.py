@@ -4084,7 +4084,7 @@ def download_volume_csv(symbol=None, symbol_type="U", expiry_date=None):
     except requests.exceptions.RequestException as e:
         return None, f"Error during request: {e}"
 
-st.sidebar.title("📊 Navigation")
+# st.sidebar.title("📊 Navigation")
 
 # Define pages with their corresponding icons
 page_icons = {
@@ -4547,21 +4547,21 @@ def chart_settings():
 # Call the regular function instead of the fragment
 chart_settings()
 
-st.sidebar.markdown("---")
-st.sidebar.markdown(
-    """
-    <div style="text-align: center;">
-        <a href="https://github.com/EazyDuz1t/EzOptions" target="_blank">
-            <img src="https://img.shields.io/badge/GitHub-Repo-blue?logo=github" alt="GitHub Repo" style="margin-bottom: 10px;">
-        </a>
-        <br>
-        <a href="https://discord.com/users/eazy101" target="_blank">
-            <img src="https://img.shields.io/badge/Discord-eazy101-7289DA?logo=discord&logoColor=white" alt="Discord User">
-        </a>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+# st.sidebar.markdown("---")
+# st.sidebar.markdown(
+#     """
+#     <div style="text-align: center;">
+#         <a href="https://github.com/EazyDuz1t/EzOptions" target="_blank">
+#             <img src="https://img.shields.io/badge/GitHub-Repo-blue?logo=github" alt="GitHub Repo" style="margin-bottom: 10px;">
+#         </a>
+#         <br>
+#         <a href="https://discord.com/users/eazy101" target="_blank">
+#             <img src="https://img.shields.io/badge/Discord-eazy101-7289DA?logo=discord&logoColor=white" alt="Discord User">
+#         </a>
+#     </div>
+#     """,
+#     unsafe_allow_html=True
+# )
 
 # Use the saved ticker and expiry date if available
 saved_ticker = st.session_state.get("saved_ticker", "")
