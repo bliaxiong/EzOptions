@@ -3555,7 +3555,7 @@ def create_iv_surface(calls_df, puts_df, current_price, selected_dates=None):
     return X, Y, Z
 
 #Streamlit UI
-st.title("Ez Options")
+# st.title("Ez Options")
 
 # Modify the reset_session_state function to preserve color settings
 def reset_session_state():
@@ -4848,6 +4848,33 @@ def get_exposure_explanation(exposure_type):
     
     return exp["title"], exp["description"], exp["explanation"]
 
+def calculate_gex_walls(calls, puts, exposure_type):
+    """
+    Calculate Call Wall and Put Wall from GEX data.
+    Call Wall: strike with the highest aggregate call GEX (strongest resistance).
+    Put Wall: strike with the highest aggregate put GEX (strongest support).
+    Returns (call_wall_strike, call_wall_value, put_wall_strike, put_wall_value).
+    """
+    call_wall_strike, call_wall_value = None, None
+    put_wall_strike, put_wall_value = None, None
+
+    if not calls.empty and exposure_type in calls.columns:
+        calls_by_strike = calls.groupby('strike')[exposure_type].sum()
+        calls_by_strike = calls_by_strike[calls_by_strike != 0]
+        if not calls_by_strike.empty:
+            call_wall_strike = calls_by_strike.abs().idxmax()
+            call_wall_value = calls_by_strike[call_wall_strike]
+
+    if not puts.empty and exposure_type in puts.columns:
+        puts_by_strike = puts.groupby('strike')[exposure_type].sum()
+        puts_by_strike = puts_by_strike[puts_by_strike != 0]
+        if not puts_by_strike.empty:
+            put_wall_strike = puts_by_strike.abs().idxmax()
+            put_wall_value = puts_by_strike[put_wall_strike]
+
+    return call_wall_strike, call_wall_value, put_wall_strike, put_wall_value
+
+
 def create_exposure_bar_chart(calls, puts, exposure_type, title, S):
     # Get colors from session state at the start
     call_color = st.session_state.call_color
@@ -5349,6 +5376,36 @@ def create_exposure_bar_chart(calls, puts, exposure_type, title, S):
                     font=dict(size=st.session_state.chart_text_size)
                 )
             )
+
+        # Add GEX Call Wall and Put Wall lines
+        if exposure_type in ['GEX', 'GEX_notional']:
+            cw_strike, cw_val, pw_strike, pw_val = calculate_gex_walls(calls, puts, exposure_type)
+            for wall_strike, wall_color, wall_label, ann_pos_v, ann_pos_h in [
+                (cw_strike, call_color, 'Call Wall', 'top right', 'right'),
+                (pw_strike, put_color, 'Put Wall', 'top left', 'left'),
+            ]:
+                if wall_strike is not None and wall_strike in present_strikes:
+                    wall_pos = present_strikes.index(wall_strike)
+                    if st.session_state.chart_type == 'Horizontal Bar':
+                        fig.add_hline(
+                            y=wall_pos,
+                            line_dash="dot",
+                            line_color=wall_color,
+                            opacity=0.9,
+                            annotation_text=f"{wall_label}: {wall_strike}",
+                            annotation_position=ann_pos_h,
+                            annotation=dict(font=dict(size=st.session_state.chart_text_size, color=wall_color))
+                        )
+                    else:
+                        fig.add_vline(
+                            x=wall_pos,
+                            line_dash="dot",
+                            line_color=wall_color,
+                            opacity=0.9,
+                            annotation_text=f"{wall_label}: {wall_strike}",
+                            annotation_position=ann_pos_v,
+                            annotation=dict(font=dict(size=st.session_state.chart_text_size, color=wall_color))
+                        )
     else:
         # Fallback for empty data
         fig = add_current_price_line(fig, S)
@@ -7148,24 +7205,24 @@ elif st.session_state.current_page == "Dashboard":
     main_placeholder.empty()
     
     with main_placeholder.container():
-        # Create a single input for ticker with refresh button
-        col1, col2 = st.columns([0.94, 0.06])
+        # Create a single input for ticker with expiry selector and refresh button
+        col1, col2, col_refresh = st.columns([0.47, 0.47, 0.06])
         with col1:
             user_ticker = st.text_input("Enter Stock Ticker (e.g., SPY, TSLA, SPX, NDX):", saved_ticker, key="dashboard_ticker")
-        with col2:
+        with col_refresh:
             st.write("")  # Add some spacing
             st.write("")  # Add some spacing
             if st.button("🔄", key="refresh_button_dashboard"):
                 st.cache_data.clear()
                 st.rerun()
-        
+
         ticker = format_ticker(user_ticker)
-        
+
         # Clear cache if ticker changes
         if ticker != saved_ticker:
             st.cache_data.clear()
             save_ticker(ticker)
-        
+
         if ticker:
             # Fetch price once
             S = get_current_price(ticker)
@@ -7178,9 +7235,10 @@ elif st.session_state.current_page == "Dashboard":
             if not available_dates:
                 st.warning("No options data available for this ticker.")
             else:
-                selected_expiry_dates, selector_container = expiry_selector_fragment("Dashboard", available_dates)
+                with col2:
+                    selected_expiry_dates, selector_container = expiry_selector_fragment("Dashboard", available_dates)
                 st.session_state.expiry_selector_container = selector_container
-                
+
                 if not selected_expiry_dates:
                     st.warning("Please select at least one expiration date.")
                     st.stop()
@@ -7460,6 +7518,41 @@ elif st.session_state.current_page == "Dashboard":
                                 # Include strikes in y-axis range
                                 y_min = min(y_min, levels_to_scale['strike'].min() - padding)
                                 y_max = max(y_max, levels_to_scale['strike'].max() + padding)
+
+                        # Add GEX Call Wall and Put Wall on intraday chart
+                        if 'GEX' in st.session_state.intraday_exposure_levels and not calls.empty and not puts.empty:
+                            gex_col = 'GEX_notional' if st.session_state.get('calculate_in_notional', True) and 'GEX_notional' in calls.columns else 'GEX'
+                            cw_strike, cw_val, pw_strike, pw_val = calculate_gex_walls(calls, puts, gex_col)
+                            for wall_strike, wall_val, wall_color, wall_label in [
+                                (cw_strike, cw_val, st.session_state.call_color, 'Call Wall'),
+                                (pw_strike, pw_val, st.session_state.put_color, 'Put Wall'),
+                            ]:
+                                if wall_strike is not None and not pd.isna(wall_strike):
+                                    rgb = tuple(int(wall_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+                                    color = f'rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, 1.0)'
+                                    fig_intraday.add_shape(
+                                        type='line',
+                                        x0=intraday_data.index[0],
+                                        x1=intraday_data.index[-1],
+                                        y0=wall_strike,
+                                        y1=wall_strike,
+                                        line=dict(color=color, width=2, dash='dot'),
+                                        xref='x',
+                                        yref='y',
+                                        layer='below'
+                                    )
+                                    fig_intraday.add_annotation(
+                                        x=0.92,
+                                        y=wall_strike,
+                                        text=f"{wall_label}: {wall_strike}",
+                                        font=dict(color=color, size=st.session_state.chart_text_size),
+                                        showarrow=False,
+                                        xref="paper",
+                                        yref="y",
+                                        xanchor="left"
+                                    )
+                                    y_min = min(y_min, wall_strike - padding)
+                                    y_max = max(y_max, wall_strike + padding)
 
                         # Add Straddle if enabled
                         if st.session_state.show_straddle:
@@ -7777,7 +7870,7 @@ elif st.session_state.current_page == "Dashboard":
                         "Charm Exposure", "Speed Exposure", "Vomma Exposure", "Color Exposure", "Volume Ratio",
                         "Max Pain", "Delta-Adjusted Value Index", "Volume by Strike"
                     ]
-                    default_charts = ["Intraday Price", "Gamma Exposure", "Vanna Exposure", "Delta Exposure", "Charm Exposure"]
+                    default_charts = ["Gamma Exposure", "Charm Exposure", "Delta Exposure", "Vanna Exposure", "Max Pain"]
                     selected_charts = st.multiselect("Select charts to display:", chart_options, default=[
                         chart for chart in default_charts if chart in chart_options
                     ])
@@ -7801,7 +7894,7 @@ elif st.session_state.current_page == "Dashboard":
                                     " ".join([f"<span style='color: {st.session_state.put_color}'>{loser['symbol']}: {loser['regularMarketChangePercent']:.1f}%</span> "
                                             for _, loser in top_losers.iterrows()])
                                 )
-                                st.markdown(market_text, unsafe_allow_html=True)
+                                # st.markdown(market_text, unsafe_allow_html=True)
                             
                             # Get additional market data
                             try:
@@ -7882,12 +7975,13 @@ elif st.session_state.current_page == "Dashboard":
                                     {options_volume_text and f"<br><span style='color: gray; font-size: 14px;'>{options_volume_text}{call_put_ratio_text}</span>" or ""}
                                 </div>
                                 """
-                                st.markdown(price_text, unsafe_allow_html=True)
+                                # st.markdown(price_text, unsafe_allow_html=True)
                             except Exception as e:
                                 st.markdown(f"#### Current Price: ${current_price:.2f}")
                                 print(f"Error fetching additional market data: {e}")
                             
                             st.markdown("---")
+                    
                     # Display selected charts
                     if "Intraday Price" in selected_charts:
                         st.plotly_chart(
@@ -8444,6 +8538,8 @@ elif st.session_state.current_page == "GEX Surface":
                 # Fetch options data
                 with st.spinner('Fetching options data...'):
                     all_data = []  # Store all computed GEX data
+                    all_call_gex = {}  # strike -> total call GEX for wall calculation
+                    all_put_gex = {}   # strike -> total put GEX for wall calculation
 
                     # Calculate strike range using percentage-based setting
                     strike_range = calculate_strike_range(S)
@@ -8480,7 +8576,9 @@ elif st.session_state.current_page == "GEX Surface":
                                                 'days': days_to_exp,
                                                 'gex': row['GEX']
                                             })
-                                    
+                                            s = row['strike']
+                                            all_call_gex[s] = all_call_gex.get(s, 0) + row['GEX']
+
                                     for _, row in puts.iterrows():
                                         if not pd.isna(row['GEX']) and abs(row['GEX']) >= 100:
                                             all_data.append({
@@ -8488,6 +8586,8 @@ elif st.session_state.current_page == "GEX Surface":
                                                 'days': days_to_exp,
                                                 'gex': row['GEX']
                                             })
+                                            s = row['strike']
+                                            all_put_gex[s] = all_put_gex.get(s, 0) + row['GEX']
                             except Exception as e:
                                 print(f"Error processing date {future_to_date[future]}: {e}")
 
@@ -8533,7 +8633,29 @@ elif st.session_state.current_page == "GEX Surface":
                             annotation_text=f"{S:.2f}",
                             annotation_position="top"
                         )
-                        
+
+                        # Add Call Wall and Put Wall lines
+                        if all_call_gex:
+                            cw_strike = max(all_call_gex, key=lambda k: all_call_gex[k])
+                            fig.add_vline(
+                                x=cw_strike,
+                                line_dash="dot",
+                                line_color=st.session_state.call_color,
+                                opacity=0.9,
+                                annotation_text=f"Call Wall: {cw_strike}",
+                                annotation_position="top right"
+                            )
+                        if all_put_gex:
+                            pw_strike = max(all_put_gex, key=lambda k: all_put_gex[k])
+                            fig.add_vline(
+                                x=pw_strike,
+                                line_dash="dot",
+                                line_color=st.session_state.put_color,
+                                opacity=0.9,
+                                annotation_text=f"Put Wall: {pw_strike}",
+                                annotation_position="top left"
+                            )
+
                         # Update layout with adjusted range
                         padding = (max_strike - min_strike) * 0.05
                         fig.update_layout(
@@ -9127,9 +9249,20 @@ elif st.session_state.current_page == "Exposure Heatmap":
                     st.warning("No options data available for this ticker.")
                     st.stop()
                 
-                # Use shared expiry selector
-                selected_expiry_dates, _ = expiry_selector_fragment("Exposure Heatmap", available_dates)
-                
+                # Use shared expiry selector (50%) + strike count input (50%)
+                col_expiry, col_strike_count = st.columns(2)
+                with col_expiry:
+                    selected_expiry_dates, _ = expiry_selector_fragment("Exposure Heatmap", available_dates)
+                with col_strike_count:
+                    heatmap_strike_count = st.number_input(
+                        "Strikes Above/Below Current Price (0 = all):",
+                        min_value=0,
+                        value=st.session_state.get('heatmap_strike_count', 0),
+                        step=1,
+                        key="heatmap_strike_count",
+                        help="Enter N to display N strikes above and N strikes below the current price. Set to 0 to show all strikes."
+                    )
+
                 if not selected_expiry_dates:
                     st.warning("Please select at least one expiration date")
                     st.stop()
@@ -9226,7 +9359,15 @@ elif st.session_state.current_page == "Exposure Heatmap":
                 min_strike = S - strike_range
                 max_strike = S + strike_range
                 filtered_strikes = [s for s in all_strikes if min_strike <= s <= max_strike]
-                
+
+                # Apply strike count filter: N above and N below current price
+                heatmap_strike_count = st.session_state.get('heatmap_strike_count', 0)
+                if heatmap_strike_count > 0 and filtered_strikes:
+                    atm_idx = min(range(len(filtered_strikes)), key=lambda i: abs(filtered_strikes[i] - S))
+                    start_idx = max(0, atm_idx - heatmap_strike_count)
+                    end_idx = min(len(filtered_strikes), atm_idx + heatmap_strike_count + 1)
+                    filtered_strikes = filtered_strikes[start_idx:end_idx]
+
                 # Calculate current price index for the heatmap line
                 s_index = np.interp(S, filtered_strikes, np.arange(len(filtered_strikes)))
                 
